@@ -5,6 +5,10 @@
 #include <unistd.h>
 #include <semaphore.h>
 
+#include <sys/stat.h>
+#include <fcntl.h>
+
+
 #include <OpenMAX/IL/OMX_Core.h>
 #include <OpenMAX/IL/OMX_Component.h>
 #include <OpenMAX/IL/OMX_Types.h>
@@ -16,6 +20,7 @@
 #define FILENAME "OMX.Nvidia.index.param.filename"
 
 #define DEBUG
+#define DUMP
 
 static int new_state;
 static sem_t wait_for_state;
@@ -33,6 +38,8 @@ static sem_t buffer_out_filled;
 static int buffer_out_nb;
 static int buffer_out_avp, buffer_out_ap;
 static int buffer_out_size;
+
+int dumper; // write out fd
 
 #define OMXE(e) if(e != OMX_ErrorNone) \
 			fprintf(stderr, "EE:%s:%d:%x\n", __FUNCTION__, __LINE__, e);
@@ -80,9 +87,13 @@ static OMX_ERRORTYPE decoderFillBufferDone(
 	bufstate(buffer_out_pos);
 	buffer_out_ap++;
 	buffer_out_avp--;
-	int i;
+
+#ifdef DUMP
+	write(dumper, pBuffer->pBuffer,  pBuffer->nFilledLen);
+#endif
 
 #if 0
+	int i;
 	printf("dump: ->");
 	for(i=0;i<pBuffer->nFilledLen;i++)
 		printf("%02x ", *(pBuffer->pBuffer+i));
@@ -145,6 +156,10 @@ static OMX_ERRORTYPE decoderEventHandler(
 		break;
 	case OMX_EventBufferFlag:
 		printf("thas alll\n");
+
+#ifdef DUMP
+		close(dumper);
+#endif
 		exit(0);
 	}
 	return 0;
@@ -284,6 +299,10 @@ void decode() //void * data, int len)
 }
 
 int main() {
+#ifdef DUMP
+	dumper=open("dump.out", O_WRONLY | O_CREAT);
+#endif
+
 	init();
 
 	while(1)
