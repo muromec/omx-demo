@@ -142,6 +142,10 @@ static OMX_ERRORTYPE decoderEventHandler(
 		fprintf(stderr, "FPS=%d*2**16 + %d\n", paramPort.format.video.xFramerate>>16, paramPort.format.video.xFramerate&0xffff);
 		*/
 		printf("ou~\n");
+		break;
+	case OMX_EventBufferFlag:
+		printf("thas alll\n");
+		exit(0);
 	}
 	return 0;
 }
