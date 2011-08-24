@@ -1,0 +1,6 @@
+OpenMAX demo and test for nvidia tegra boards.
+
+To compile run "make". 
+
+To check if its working run "make run". You need
+ test.mp4 file in current dir to see something
