@@ -239,7 +239,7 @@ static int init()
 	printf("Requesting %d buffers of %d bytes\n", paramPort.nBufferCountMin, paramPort.nBufferSize);
 #endif
 
-	paramPort.nBufferSize = 512000;
+	paramPort.nBufferSize=1920*816*3/2;
 	paramPort.format.video.nStride ; // FIXME
 	paramPort.format.video.eCompressionFormat = 7;
 	paramPort.format.video.eColorFormat = 19;
