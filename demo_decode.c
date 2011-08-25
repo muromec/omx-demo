@@ -12,15 +12,11 @@
 #include <OpenMAX/IL/OMX_Core.h>
 #include <OpenMAX/IL/OMX_Component.h>
 #include <OpenMAX/IL/OMX_Types.h>
-#include <NVOMX_ParserExtensions.h>
 
-#define COMPONENT "OMX.Nvidia.mp4.read"
-
-//#define COMPONENT "OMX.Nvidia.video.read"
-#define FILENAME "OMX.Nvidia.index.param.filename"
+#define COMPONENT "OMX.Nvidia.h264ext.decode"
 
 #define DEBUG
-#define DUMP
+//#define DUMP
 
 static int new_state;
 static sem_t wait_for_state;
@@ -29,8 +25,9 @@ static int image_width=0;
 static int image_height=0;
 
 static OMX_BUFFERHEADERTYPE *omx_buffers_out[100];
+static OMX_BUFFERHEADERTYPE *omx_buffers_in[100];
+
 static OMX_HANDLETYPE decoderhandle;
-static int vo_inited=0;
 
 static int buffer_out_pos;
 static int buffer_out_requested;
@@ -39,20 +36,28 @@ static int buffer_out_nb;
 static int buffer_out_avp, buffer_out_ap;
 static int buffer_out_size;
 
-int dumper; // write out fd
+static int buffer_in_pos;
+static int buffer_in_requested;
+static sem_t buffer_in_filled;
+static int buffer_in_nb;
+static int buffer_in_avp, buffer_in_ap;
+static int buffer_in_size;
+
+int dumper, input; // write out fd
 
 #define OMXE(e) if(e != OMX_ErrorNone) \
 			fprintf(stderr, "EE:%s:%d:%x\n", __FUNCTION__, __LINE__, e);
 
 
-#define bufstate(_pos) \
-printf("%d %d %d %x\n", \
-			buffer_out_ap, \
-			buffer_out_avp, \
-			_pos%buffer_out_nb, \
-			 omx_buffers_out[ \
-				_pos % buffer_out_nb \
-			] \
+#define bufstate(_d) \
+printf(#_d": %d %d %d %x\n", \
+		buffer_##_d##_ap, \
+		buffer_##_d##_avp, \
+		buffer_##_d##_pos%buffer_##_d##_nb, \
+		\
+		omx_buffers_##_d[ \
+			buffer_##_d##_pos % buffer_##_d##_nb \
+		] \
 	)
 
 static void setHeader(OMX_PTR header, OMX_U32 size) {
@@ -70,6 +75,10 @@ static OMX_ERRORTYPE decoderEmptyBufferDone(
 		OMX_OUT OMX_PTR pAppData,
 		OMX_OUT OMX_BUFFERHEADERTYPE* pBuffer) {
 	printf("empty\n");
+
+	buffer_in_ap++;
+	buffer_in_avp--;
+
 	return 0;
 }
 
@@ -84,7 +93,7 @@ static OMX_ERRORTYPE decoderFillBufferDone(
 
 	got +=  pBuffer->nFilledLen,
 	printf("filled %x %d %d %d\n", pBuffer,  pBuffer->nFilledLen, got, times );
-	bufstate(buffer_out_pos);
+	bufstate(out);
 	buffer_out_ap++;
 	buffer_out_avp--;
 
@@ -161,6 +170,9 @@ static OMX_ERRORTYPE decoderEventHandler(
 		close(dumper);
 #endif
 		exit(0);
+	case OMX_EventError:
+		printf("fail\n");
+		exit(1);
 	}
 	return 0;
 }
@@ -208,53 +220,45 @@ static int init()
 	err = OMX_GetHandle(&decoderhandle, COMPONENT, NULL, &decodercallbacks);
 	OMXE(err);
 
-	// set filepath
-	NVX_PARAM_FILENAME filename;
-	OMX_INDEXTYPE filename_idx;
 
-	err=OMX_GetExtensionIndex(decoderhandle, FILENAME, &filename_idx);
-	OMXE(err);
-	printf("filename: %d\n");
-
-	setHeader(&filename, sizeof(filename));
-
-	filename.pFilename = "test.mp4";
-
-	err=OMX_SetParameter(decoderhandle, filename_idx, &filename);
-	OMXE(err);
-
-	err = OMX_SendCommand(decoderhandle, OMX_CommandPortDisable, 1, 0);
-	OMXE(err);
-
-	
-
+	// output buffers
 	setHeader(&paramPort, sizeof(paramPort));
-	paramPort.nPortIndex = 0;
+	paramPort.nPortIndex = 1;
 
 	err=OMX_GetParameter(decoderhandle, OMX_IndexParamPortDefinition, &paramPort);
 	OMXE(err);
 
 
+/*
+ * Codec=7
+ * Color=19
+ * Size=1920x816
+ * */
+
 #ifdef DEBUG
-	printf("Codec=%d\n", paramPort.format.video.eCompressionFormat);
-	printf("Color=%d\n", paramPort.format.video.eColorFormat);
-	printf("Size=%dx%d\n", paramPort.format.video.nFrameWidth,
-			paramPort.format.video.nFrameHeight);
-
-
 	printf("Requesting %d buffers of %d bytes\n", paramPort.nBufferCountMin, paramPort.nBufferSize);
 #endif
 
+	paramPort.nBufferSize = 512000;
+	paramPort.format.video.nStride ; // FIXME
+	paramPort.format.video.eCompressionFormat = 7;
+	paramPort.format.video.eColorFormat = 19;
+	paramPort.format.video.nFrameWidth = 1920;
+	paramPort.format.video.nFrameHeight = 816;
+
+	err=OMX_SetParameter(decoderhandle, OMX_IndexParamPortDefinition, &paramPort);
+	OMXE(err);
+
 	int i;
 	for(i=0;i<paramPort.nBufferCountMin;++i) {
-		err = OMX_AllocateBuffer(decoderhandle, &omx_buffers_out[i], 0, NULL, paramPort.nBufferSize);
+		err = OMX_AllocateBuffer(decoderhandle, &omx_buffers_out[i], 1, NULL, paramPort.nBufferSize);
 		OMXE(err);
 
 #ifdef DEBUG
 		printf("buf_out[%d]=%p\n", i, omx_buffers_out[i]);
 #endif
-}
-
+	}
+	
 
 	buffer_out_nb = paramPort.nBufferCountMin;
 	buffer_out_ap = buffer_out_nb;
@@ -263,6 +267,37 @@ static int init()
 	buffer_out_pos=0;
 	buffer_out_size=paramPort.nBufferSize;
 
+	// input buffers
+	setHeader(&paramPort, sizeof(paramPort));
+	paramPort.nPortIndex = 0;
+
+	err=OMX_GetParameter(decoderhandle, OMX_IndexParamPortDefinition, &paramPort);
+	OMXE(err);
+
+#ifdef DEBUG
+	printf("Requesting %d buffers of %d bytes\n", paramPort.nBufferCountMin, paramPort.nBufferSize);
+#endif
+
+	for(i=0;i<paramPort.nBufferCountMin;++i) {
+		err = OMX_AllocateBuffer(decoderhandle, &omx_buffers_in[i], 0, NULL, paramPort.nBufferSize);
+		OMXE(err);
+
+#ifdef DEBUG
+		printf("buf_in[%d]=%p\n", i, omx_buffers_in[i]);
+#endif
+	}
+
+
+
+	buffer_in_nb = paramPort.nBufferCountMin;
+	buffer_in_ap = buffer_in_nb;
+	buffer_in_avp = 0;
+
+	buffer_in_pos=0;
+	buffer_in_size=paramPort.nBufferSize;
+
+
+	
 	printf("idle\n");
 	GoToState(OMX_StateIdle);
 
@@ -277,9 +312,11 @@ void decode() //void * data, int len)
 {
 	OMX_ERRORTYPE err;
 	int size;
+	OMX_BUFFERHEADERTYPE *buf;
+
 
 	while(buffer_out_ap > 0) {
-		bufstate(buffer_out_pos);
+		bufstate(out);
 
 		err = OMX_FillThisBuffer(decoderhandle, omx_buffers_out[buffer_out_pos % buffer_out_nb]);
 		OMXE(err);
@@ -290,15 +327,36 @@ void decode() //void * data, int len)
 		buffer_out_pos++;
 	}
 
+	int read_len;
+	while(buffer_in_ap > 0) {
+		buf = omx_buffers_in[buffer_in_pos % buffer_in_nb];
+		read_len = read(input, buf->pBuffer, 4096);
+		printf("read: %d\n", read_len);
+		buf->nFilledLen = read_len;
 
+		bufstate(in);
+
+		err = OMX_EmptyThisBuffer(decoderhandle, buf);
+		OMXE(err);
+
+		buffer_in_ap--;
+		buffer_in_avp++;
+		buffer_in_pos++;
+
+	}
+
+
+	/*
 	printf("wait filled cb\n");
 	sem_wait(&buffer_out_filled);
 	printf("ok...\n");
+	*/
 
 
 }
 
 int main() {
+	input = open("test.h264", O_RDONLY);
 #ifdef DUMP
 	dumper=open("dump.out", O_WRONLY | O_CREAT);
 #endif
