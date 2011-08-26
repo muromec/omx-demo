@@ -13,10 +13,10 @@
 #include <OpenMAX/IL/OMX_Component.h>
 #include <OpenMAX/IL/OMX_Types.h>
 
-#define COMPONENT "OMX.Nvidia.h264ext.decode"
+#define COMPONENT "OMX.Nvidia.h264.decode"
 
 #define DEBUG
-//#define DUMP
+#define DUMP
 
 static int new_state;
 static sem_t wait_for_state;
@@ -99,6 +99,8 @@ static OMX_ERRORTYPE decoderFillBufferDone(
 
 #ifdef DUMP
 	write(dumper, pBuffer->pBuffer,  pBuffer->nFilledLen);
+	fsync(dumper);
+	printf("sync...\n");
 #endif
 
 #if 0
@@ -239,12 +241,9 @@ static int init()
 	printf("Requesting %d buffers of %d bytes\n", paramPort.nBufferCountMin, paramPort.nBufferSize);
 #endif
 
-	paramPort.nBufferSize=1920*816*3/2;
-	paramPort.format.video.nStride ; // FIXME
-	paramPort.format.video.eCompressionFormat = 7;
-	paramPort.format.video.eColorFormat = 19;
-	paramPort.format.video.nFrameWidth = 1920;
-	paramPort.format.video.nFrameHeight = 816;
+	paramPort.nBufferSize=848*480*3/2;
+	paramPort.format.video.nFrameWidth = 848;
+	paramPort.format.video.nFrameHeight = 480;;
 
 	err=OMX_SetParameter(decoderhandle, OMX_IndexParamPortDefinition, &paramPort);
 	OMXE(err);
