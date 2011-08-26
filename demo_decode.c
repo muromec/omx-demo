@@ -16,32 +16,22 @@
 #define COMPONENT "OMX.Nvidia.h264.decode"
 
 #define DEBUG
-#define DUMP
+//#define DUMP
 
 static int new_state;
 static sem_t wait_for_state;
 static sem_t wait_for_parameters;
+static sem_t wait_buff;
 static int image_width=0;
 static int image_height=0;
 
-static OMX_BUFFERHEADERTYPE *omx_buffers_out[100];
-static OMX_BUFFERHEADERTYPE *omx_buffers_in[100];
+static OMX_BUFFERHEADERTYPE **omx_buffers_out;
+static OMX_BUFFERHEADERTYPE **omx_buffers_in;
 
 static OMX_HANDLETYPE decoderhandle;
 
-static int buffer_out_pos;
-static int buffer_out_requested;
-static sem_t buffer_out_filled;
-static int buffer_out_nb;
-static int buffer_out_avp, buffer_out_ap;
-static int buffer_out_size;
-
-static int buffer_in_pos;
-static int buffer_in_requested;
-static sem_t buffer_in_filled;
-static int buffer_in_nb;
-static int buffer_in_avp, buffer_in_ap;
-static int buffer_in_size;
+static int buffer_out_mask, buffer_out_nb;
+static int buffer_in_mask, buffer_in_nb;
 
 int dumper, input; // write out fd
 
@@ -74,10 +64,13 @@ static OMX_ERRORTYPE decoderEmptyBufferDone(
 		OMX_OUT OMX_HANDLETYPE hComponent,
 		OMX_OUT OMX_PTR pAppData,
 		OMX_OUT OMX_BUFFERHEADERTYPE* pBuffer) {
-	printf("empty\n");
 
-	buffer_in_ap++;
-	buffer_in_avp--;
+	printf("empty %x\n", pBuffer->pPlatformPrivate);
+	if(pBuffer->pPlatformPrivate < 102400)
+		exit(1);
+
+	buffer_in_mask |= 1<<*(short*)pBuffer->pPlatformPrivate;
+	sem_post(&wait_buff);
 
 	return 0;
 }
@@ -93,15 +86,16 @@ static OMX_ERRORTYPE decoderFillBufferDone(
 
 	got +=  pBuffer->nFilledLen,
 	printf("filled %x %d %d %d\n", pBuffer,  pBuffer->nFilledLen, got, times );
-	bufstate(out);
-	buffer_out_ap++;
-	buffer_out_avp--;
 
 #ifdef DUMP
 	write(dumper, pBuffer->pBuffer,  pBuffer->nFilledLen);
 	fsync(dumper);
 	printf("sync...\n");
 #endif
+
+	buffer_out_mask |= 1<<*(short*)pBuffer->pPlatformPrivate;
+
+	sem_post(&wait_buff);
 
 #if 0
 	int i;
@@ -112,7 +106,6 @@ static OMX_ERRORTYPE decoderFillBufferDone(
 	printf("<-\n");
 #endif
 
-	sem_post(&buffer_out_filled);
 	return 0;
 }
 
@@ -217,7 +210,7 @@ static int init()
 	}
 	sem_init(&wait_for_state, 0, 0);
 	sem_init(&wait_for_parameters, 0, 0);
-	sem_init(&buffer_out_filled, 0, 0);
+	sem_init(&wait_buff, 0, 0);
 
 	err = OMX_GetHandle(&decoderhandle, COMPONENT, NULL, &decodercallbacks);
 	OMXE(err);
@@ -248,10 +241,21 @@ static int init()
 	err=OMX_SetParameter(decoderhandle, OMX_IndexParamPortDefinition, &paramPort);
 	OMXE(err);
 
+	omx_buffers_out = malloc(sizeof(OMX_BUFFERHEADERTYPE*) * paramPort.nBufferCountMin);
+
 	int i;
+	short *count = malloc(paramPort.nBufferCountMin+100);
+
 	for(i=0;i<paramPort.nBufferCountMin;++i) {
 		err = OMX_AllocateBuffer(decoderhandle, &omx_buffers_out[i], 1, NULL, paramPort.nBufferSize);
 		OMXE(err);
+
+		buffer_out_mask |= 1<<i;
+
+		omx_buffers_out[i]->pPlatformPrivate = count;
+		*count = i;
+		count++;
+
 
 #ifdef DEBUG
 		printf("buf_out[%d]=%p\n", i, omx_buffers_out[i]);
@@ -260,11 +264,6 @@ static int init()
 	
 
 	buffer_out_nb = paramPort.nBufferCountMin;
-	buffer_out_ap = buffer_out_nb;
-	buffer_out_avp = 0;
-
-	buffer_out_pos=0;
-	buffer_out_size=paramPort.nBufferSize;
 
 	// input buffers
 	setHeader(&paramPort, sizeof(paramPort));
@@ -277,9 +276,20 @@ static int init()
 	printf("Requesting %d buffers of %d bytes\n", paramPort.nBufferCountMin, paramPort.nBufferSize);
 #endif
 
+	omx_buffers_in = malloc(sizeof(OMX_BUFFERHEADERTYPE*) * paramPort.nBufferCountMin);
+
+	count = malloc(paramPort.nBufferCountMin+100);
+
+
 	for(i=0;i<paramPort.nBufferCountMin;++i) {
 		err = OMX_AllocateBuffer(decoderhandle, &omx_buffers_in[i], 0, NULL, paramPort.nBufferSize);
 		OMXE(err);
+
+		buffer_in_mask |= 1<<i;
+
+		omx_buffers_in[i]->pPlatformPrivate = count;
+		*count = i;
+		count++;
 
 #ifdef DEBUG
 		printf("buf_in[%d]=%p\n", i, omx_buffers_in[i]);
@@ -289,12 +299,6 @@ static int init()
 
 
 	buffer_in_nb = paramPort.nBufferCountMin;
-	buffer_in_ap = buffer_in_nb;
-	buffer_in_avp = 0;
-
-	buffer_in_pos=0;
-	buffer_in_size=paramPort.nBufferSize;
-
 
 	
 	printf("idle\n");
@@ -310,37 +314,53 @@ static int init()
 void decode() //void * data, int len)
 {
 	OMX_ERRORTYPE err;
-	int size;
+	int size, i;
 	OMX_BUFFERHEADERTYPE *buf;
 
+	if(!(buffer_in_mask || buffer_out_mask)) {
+		printf("wait damn avp\n");
+		sem_wait(&wait_buff);
+	}
 
-	while(buffer_out_ap > 0) {
-		bufstate(out);
+	for(i=0;i<buffer_out_nb;i++) {
 
-		err = OMX_FillThisBuffer(decoderhandle, omx_buffers_out[buffer_out_pos % buffer_out_nb]);
+		printf("<out mask: %x i=%d\n",  buffer_out_mask, i );
+
+		if( ! ((1<<i) & buffer_out_mask ) )
+			continue;
+
+		err = OMX_FillThisBuffer(decoderhandle, omx_buffers_out[i]);
 		OMXE(err);
 
-		buffer_out_ap--;
-		buffer_out_avp++;
+		buffer_out_mask &= (1<<i) ^ 0xFFFFFFFF;
+		
+		printf(">out mask: %x i=%d\n",  buffer_out_mask, i );
 
-		buffer_out_pos++;
 	}
 
 	int read_len;
-	while(buffer_in_ap > 0) {
-		buf = omx_buffers_in[buffer_in_pos % buffer_in_nb];
+	
+	for(i=0;i<buffer_in_nb;i++) {
+
+
+		buf = omx_buffers_in[i];
+
+		printf("<in mask: %x i=%d\n",  buffer_in_mask, i );
+
+		if( ! ((1<<i) & buffer_in_mask ) )
+			continue;
+
 		read_len = read(input, buf->pBuffer, 4096);
 		printf("read: %d\n", read_len);
 		buf->nFilledLen = read_len;
 
-		bufstate(in);
-
 		err = OMX_EmptyThisBuffer(decoderhandle, buf);
 		OMXE(err);
 
-		buffer_in_ap--;
-		buffer_in_avp++;
-		buffer_in_pos++;
+
+		buffer_in_mask &= (1<<i) ^ 0xFFFFFFFF;
+		
+		printf(">in mask: %x i=%d\n",  buffer_in_mask, i );
 
 	}
 
