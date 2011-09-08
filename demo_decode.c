@@ -31,7 +31,7 @@ static OMX_BUFFERHEADERTYPE **omx_buffers_in;
 static OMX_HANDLETYPE decoderhandle;
 
 static int buffer_out_mask, buffer_out_nb;
-static int buffer_in_mask, buffer_in_nb;
+static int buffer_in_mask, buffer_in_nb, buffer_in_size;
 
 int dumper, input; // write out fd
 
@@ -280,6 +280,9 @@ static int init()
 
 	count = malloc(paramPort.nBufferCountMin+100);
 
+        printf("buffers: %d x %d\n", paramPort.nBufferSize, paramPort.nBufferCountMin);
+
+        buffer_in_size = paramPort.nBufferSize;
 
 	for(i=0;i<paramPort.nBufferCountMin;++i) {
 		err = OMX_AllocateBuffer(decoderhandle, &omx_buffers_in[i], 0, NULL, paramPort.nBufferSize);
@@ -324,8 +327,6 @@ void decode() //void * data, int len)
 
 	for(i=0;i<buffer_out_nb;i++) {
 
-		printf("<out mask: %x i=%d\n",  buffer_out_mask, i );
-
 		if( ! ((1<<i) & buffer_out_mask ) )
 			continue;
 
@@ -334,8 +335,6 @@ void decode() //void * data, int len)
 
 		buffer_out_mask &= (1<<i) ^ 0xFFFFFFFF;
 		
-		printf(">out mask: %x i=%d\n",  buffer_out_mask, i );
-
 	}
 
 	int read_len;
@@ -345,12 +344,10 @@ void decode() //void * data, int len)
 
 		buf = omx_buffers_in[i];
 
-		printf("<in mask: %x i=%d\n",  buffer_in_mask, i );
-
 		if( ! ((1<<i) & buffer_in_mask ) )
 			continue;
 
-		read_len = read(input, buf->pBuffer, 4096);
+		read_len = read(input, buf->pBuffer, buffer_in_size/4);
 		printf("read: %d\n", read_len);
 		buf->nFilledLen = read_len;
 
@@ -360,8 +357,6 @@ void decode() //void * data, int len)
 
 		buffer_in_mask &= (1<<i) ^ 0xFFFFFFFF;
 		
-		printf(">in mask: %x i=%d\n",  buffer_in_mask, i );
-
 	}
 
 
